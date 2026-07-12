@@ -6,8 +6,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const JWT_SECRET = process.env.JWT_SECRET || 'transitops_secret_key_change_in_production';
+const PORT = 3000;
+const JWT_SECRET = 'transitops_secret_key_change_in_production';
 const JWT_EXPIRES_IN = '24h';
 
 // MIDDLEWARE CONFIG
@@ -18,11 +18,11 @@ app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 // DATABASE CONNECTION POOL
 const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'transitops',
-  password: process.env.DB_PASSWORD || 'postgres',
-  port: process.env.DB_PORT || 5432,
+  user: 'postgres',
+  host: 'localhost',
+  database: 'transitops',
+  password: 'postgres',
+  port: 5432,
 });
 
 
@@ -105,18 +105,6 @@ function authenticateToken(req, res, next) {
 
 // Apply auth middleware to all /api/* routes below this point
 app.use('/api', authenticateToken);
-
-// ROLE-BASED ACCESS CONTROL MIDDLEWARE
-// Usage: requireRole('fleet_manager') or requireRole(['fleet_manager', 'financial_analyst'])
-function requireRole(allowedRoles) {
-  const roles = Array.isArray(allowedRoles) ? allowedRoles : [allowedRoles];
-  return (req, res, next) => {
-    if (!req.user || !roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'Forbidden: insufficient permissions for this action' });
-    }
-    next();
-  };
-}
 
 // GET /api/auth/me — Get current user profile from token
 app.get('/api/auth/me', async (req, res) => {
@@ -352,7 +340,7 @@ app.patch('/api/trips/:id/cancel', async (req, res) => {
 // VEHICLE CRUD ROUTES (Requires Token)
 
 // POST /api/vehicles — Add a new vehicle
-app.post('/api/vehicles', requireRole('fleet_manager'), async (req, res) => {
+app.post('/api/vehicles', async (req, res) => {
   const { registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region } = req.body;
   try {
     const result = await pool.query(
@@ -372,7 +360,7 @@ app.post('/api/vehicles', requireRole('fleet_manager'), async (req, res) => {
 });
 
 // PUT /api/vehicles/:id — Update an existing vehicle
-app.put('/api/vehicles/:id', requireRole('fleet_manager'), async (req, res) => {
+app.put('/api/vehicles/:id', async (req, res) => {
   const { id } = req.params;
   const { name_model, type, max_load_capacity, odometer, acquisition_cost, status, region } = req.body;
   try {
@@ -391,7 +379,7 @@ app.put('/api/vehicles/:id', requireRole('fleet_manager'), async (req, res) => {
 });
 
 // DELETE /api/vehicles/:id — Delete a vehicle safely
-app.delete('/api/vehicles/:id', requireRole('fleet_manager'), async (req, res) => {
+app.delete('/api/vehicles/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query('DELETE FROM vehicles WHERE id = $1 RETURNING id', [id]);
@@ -410,7 +398,7 @@ app.delete('/api/vehicles/:id', requireRole('fleet_manager'), async (req, res) =
 // DRIVER CRUD ROUTES (Requires Token)
 
 // POST /api/drivers — Add a new driver
-app.post('/api/drivers', requireRole(['fleet_manager', 'safety_officer']), async (req, res) => {
+app.post('/api/drivers', async (req, res) => {
   const { name, license_number, license_category, license_expiry_date, contact_number, safety_score, status } = req.body;
   try {
     const result = await pool.query(
@@ -429,7 +417,7 @@ app.post('/api/drivers', requireRole(['fleet_manager', 'safety_officer']), async
 });
 
 // PUT /api/drivers/:id — Update an existing driver
-app.put('/api/drivers/:id', requireRole(['fleet_manager', 'safety_officer']), async (req, res) => {
+app.put('/api/drivers/:id', async (req, res) => {
   const { id } = req.params;
   const { name, license_category, license_expiry_date, contact_number, safety_score, status } = req.body;
   try {
@@ -448,7 +436,7 @@ app.put('/api/drivers/:id', requireRole(['fleet_manager', 'safety_officer']), as
 });
 
 // DELETE /api/drivers/:id — Delete a driver safely
-app.delete('/api/drivers/:id', requireRole(['fleet_manager', 'safety_officer']), async (req, res) => {
+app.delete('/api/drivers/:id', async (req, res) => {
   const { id } = req.params;
   try {
     const result = await pool.query('DELETE FROM drivers WHERE id = $1 RETURNING id', [id]);
@@ -463,196 +451,3 @@ app.delete('/api/drivers/:id', requireRole(['fleet_manager', 'safety_officer']),
   }
 });
 
-// MAINTENANCE ROUTES (Requires Token)
-
-// GET /api/maintenance — List all maintenance logs
-app.get('/api/maintenance', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM maintenance_logs ORDER BY started_at DESC');
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Fetch maintenance error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch maintenance logs' });
-  }
-});
-
-// POST /api/maintenance — Log a new maintenance record (rule: sets vehicle to In Shop)
-app.post('/api/maintenance', requireRole('fleet_manager'), async (req, res) => {
-  const { vehicle_id, description, type, cost } = req.body;
-
-  if (!vehicle_id || !description) {
-    return res.status(400).json({ error: 'vehicle_id and description are required' });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const vehicleResult = await client.query(
-      'SELECT id, status FROM vehicles WHERE id = $1 FOR UPDATE',
-      [vehicle_id]
-    );
-    if (vehicleResult.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Vehicle not found' });
-    }
-    if (vehicleResult.rows[0].status === 'retired') {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Cannot log maintenance for a retired vehicle' });
-    }
-
-    const maintResult = await client.query(
-      `INSERT INTO maintenance_logs (vehicle_id, description, type, cost, status, started_at)
-       VALUES ($1, $2, $3, $4, 'active', NOW()) RETURNING *`,
-      [vehicle_id, description, type || 'general_service', cost || 0]
-    );
-
-    await client.query(`UPDATE vehicles SET status = 'in_shop' WHERE id = $1`, [vehicle_id]);
-
-    await client.query('COMMIT');
-    res.status(201).json(maintResult.rows[0]);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Create maintenance error:', err.message);
-    res.status(500).json({ error: 'Failed to log maintenance' });
-  } finally {
-    client.release();
-  }
-});
-
-// PATCH /api/maintenance/:id/close — Close a maintenance ticket (rule: restores vehicle to Available unless retired, logs expense)
-app.patch('/api/maintenance/:id/close', requireRole('fleet_manager'), async (req, res) => {
-  const { id } = req.params;
-  const { actual_cost } = req.body;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const maintRes = await client.query('SELECT * FROM maintenance_logs WHERE id = $1 FOR UPDATE', [id]);
-    if (maintRes.rows.length === 0) {
-      await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Maintenance record not found' });
-    }
-    const maint = maintRes.rows[0];
-    const finalCost = actual_cost !== undefined ? actual_cost : maint.cost;
-
-    const updatedMaint = await client.query(
-      `UPDATE maintenance_logs SET status = 'closed', closed_at = NOW(), cost = $1 WHERE id = $2 RETURNING *`,
-      [finalCost, id]
-    );
-
-    const vehicleRes = await client.query('SELECT status FROM vehicles WHERE id = $1 FOR UPDATE', [maint.vehicle_id]);
-    if (vehicleRes.rows.length > 0 && vehicleRes.rows[0].status !== 'retired') {
-      await client.query(`UPDATE vehicles SET status = 'available' WHERE id = $1`, [maint.vehicle_id]);
-    }
-
-    // Automatically file the resolved cost as an operational expense
-    await client.query(
-      `INSERT INTO expenses (vehicle_id, trip_id, category, description, amount, date)
-       VALUES ($1, NULL, 'maintenance', $2, $3, CURRENT_DATE)`,
-      [maint.vehicle_id, `Service resolved (${maint.type}): ${maint.description}`, finalCost]
-    );
-
-    await client.query('COMMIT');
-    res.json(updatedMaint.rows[0]);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Close maintenance error:', err.message);
-    res.status(500).json({ error: 'Failed to close maintenance record' });
-  } finally {
-    client.release();
-  }
-});
-
-// FUEL LOG ROUTES (Requires Token)
-
-// GET /api/fuel — List all fuel logs
-app.get('/api/fuel', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM fuel_logs ORDER BY date DESC');
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Fetch fuel logs error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch fuel logs' });
-  }
-});
-
-// POST /api/fuel — Log a fuel refill (also auto-files a matching 'fuel' expense entry)
-app.post('/api/fuel', requireRole(['fleet_manager', 'driver', 'financial_analyst']), async (req, res) => {
-  const { vehicle_id, trip_id, liters, cost, date } = req.body;
-
-  if (!vehicle_id || !liters || !cost) {
-    return res.status(400).json({ error: 'vehicle_id, liters, and cost are required' });
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-
-    const fuelResult = await client.query(
-      `INSERT INTO fuel_logs (vehicle_id, trip_id, liters, cost, date)
-       VALUES ($1, $2, $3, $4, COALESCE($5, CURRENT_DATE)) RETURNING *`,
-      [vehicle_id, trip_id || null, liters, cost, date || null]
-    );
-
-    await client.query(
-      `INSERT INTO expenses (vehicle_id, trip_id, category, description, amount, date)
-       VALUES ($1, $2, 'fuel', $3, $4, COALESCE($5, CURRENT_DATE))`,
-      [vehicle_id, trip_id || null, `Fuel refill: ${liters} liters`, cost, date || null]
-    );
-
-    await client.query('COMMIT');
-    res.status(201).json(fuelResult.rows[0]);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    console.error('Create fuel log error:', err.message);
-    res.status(500).json({ error: 'Failed to log fuel refill' });
-  } finally {
-    client.release();
-  }
-});
-
-// EXPENSE ROUTES (Requires Token)
-
-// GET /api/expenses — List all expenses
-app.get('/api/expenses', async (req, res) => {
-  try {
-    const result = await pool.query('SELECT * FROM expenses ORDER BY date DESC');
-    res.json(result.rows);
-  } catch (err) {
-    console.error('Fetch expenses error:', err.message);
-    res.status(500).json({ error: 'Failed to fetch expenses' });
-  }
-});
-
-// POST /api/expenses — Record an expense (toll, insurance, other)
-app.post('/api/expenses', requireRole(['fleet_manager', 'driver', 'financial_analyst']), async (req, res) => {
-  const { vehicle_id, trip_id, category, description, amount, date } = req.body;
-
-  if (!vehicle_id || !category || !description || amount === undefined) {
-    return res.status(400).json({ error: 'vehicle_id, category, description, and amount are required' });
-  }
-
-  try {
-    const result = await pool.query(
-      `INSERT INTO expenses (vehicle_id, trip_id, category, description, amount, date)
-       VALUES ($1, $2, $3, $4, $5, COALESCE($6, CURRENT_DATE)) RETURNING *`,
-      [vehicle_id, trip_id || null, category, description, amount, date || null]
-    );
-    res.status(201).json(result.rows[0]);
-  } catch (err) {
-    console.error('Create expense error:', err.message);
-    res.status(500).json({ error: 'Failed to record expense' });
-  }
-});
-
-// API HEALTH CHECK
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
-});
-
-// START SERVER
-app.listen(PORT, () => {
-  console.log(`🚀 TransitOps server running on http://localhost:${PORT}`);
-});

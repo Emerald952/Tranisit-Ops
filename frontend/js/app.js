@@ -121,26 +121,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 // Fetch live data from backend (requires valid token)
 async function tryFetchBackendData() {
   try {
-    // Fetch all core entities from PostgreSQL — maintenance/fuel/expenses now live too
-    const [vehiclesResp, driversResp, tripsResp, maintResp, fuelResp, expensesResp] = await Promise.all([
+    // Fetch all 3 core entities from PostgreSQL
+    const [vehiclesResp, driversResp, tripsResp] = await Promise.all([
       authFetch(`${API_BASE}/vehicles`),
       authFetch(`${API_BASE}/drivers`),
-      authFetch(`${API_BASE}/trips`),
-      authFetch(`${API_BASE}/maintenance`),
-      authFetch(`${API_BASE}/fuel`),
-      authFetch(`${API_BASE}/expenses`)
+      authFetch(`${API_BASE}/trips`) // <-- Added Trips!
     ]);
 
-    if (vehiclesResp.ok && driversResp.ok && tripsResp.ok && maintResp.ok && fuelResp.ok && expensesResp.ok) {
+    if (vehiclesResp.ok && driversResp.ok && tripsResp.ok) {
       state.vehicles = await vehiclesResp.json();
       state.drivers = await driversResp.json();
-      state.trips = await tripsResp.json();
-      state.maintenance = await maintResp.json();
-      state.fuel = await fuelResp.json();
-      state.expenses = await expensesResp.json();
+      state.trips = await tripsResp.json(); 
 
       console.log('✅ Connected to live backend server successfully!');
       state.isUsingLiveBackend = true;
+
+      // Temporary fallback for the modules that don't have a backend yet
+      state.maintenance = JSON.parse(localStorage.getItem('maintenance')) || MOCK_MAINTENANCE;
+      state.fuel = JSON.parse(localStorage.getItem('fuel')) || MOCK_FUEL;
+      state.expenses = JSON.parse(localStorage.getItem('expenses')) || MOCK_EXPENSES;
     } else {
       throw new Error('Backend responded with error');
     }
@@ -1196,41 +1195,38 @@ document.getElementById('btn-log-maintenance').addEventListener('click', () => {
 });
 
 // Submit maintenance (rule 9)
-document.getElementById('maintenance-form').addEventListener('submit', async (e) => {
+document.getElementById('maintenance-form').addEventListener('submit', (e) => {
   e.preventDefault();
-
+  
   const vehId = Number(document.getElementById('maint-vehicle').value);
   const type = document.getElementById('maint-type').value;
   const cost = Number(document.getElementById('maint-est-cost').value);
   const desc = document.getElementById('maint-desc').value.trim();
-
+  
   const v = state.vehicles.find(veh => veh.id === vehId);
   if (!v) return;
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    const resp = await authFetch(`${API_BASE}/maintenance`, {
-      method: 'POST',
-      body: JSON.stringify({ vehicle_id: vehId, description: desc, type, cost })
-    });
-
-    if (resp.ok) {
-      await tryFetchBackendData(); // Refresh maintenance list + vehicle status from DB
-      closeAllModals();
-      renderMaintenance();
-      showToast(`Maintenance logged. Vehicle ${v.registration_number} marked In Shop.`, 'success');
-    } else {
-      const data = await resp.json();
-      showToast(data.error || 'Failed to log maintenance', 'error');
-    }
-  } catch (err) {
-    console.error(err);
-    showToast('Network error while logging maintenance.', 'error');
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-  }
+  
+  const newId = state.maintenance.length > 0 ? Math.max(...state.maintenance.map(m => m.id)) + 1 : 1;
+  const todayStr = new Date().toISOString().split('T')[0];
+  
+  state.maintenance.push({
+    id: newId,
+    vehicle_id: vehId,
+    description: desc,
+    type: type,
+    cost: cost,
+    status: 'active',
+    started_at: todayStr,
+    closed_at: null
+  });
+  
+  // Changes vehicle status to in_shop
+  v.status = 'in_shop';
+  
+  saveStateToLocal();
+  closeAllModals();
+  renderMaintenance();
+  showToast(`Maintenance logged. Vehicle ${v.registration_number} marked In Shop.`, 'success');
 });
 
 // Close Maintenance ticket modal
@@ -1246,39 +1242,43 @@ window.openCloseMaintenanceModal = function(id) {
 };
 
 // Close Maintenance ticket submit (rule 10)
-document.getElementById('close-maintenance-form').addEventListener('submit', async (e) => {
+document.getElementById('close-maintenance-form').addEventListener('submit', (e) => {
   e.preventDefault();
-
+  
   const maintId = Number(document.getElementById('close-maint-id').value);
   const vehId = Number(document.getElementById('close-maint-vehicle-id').value);
   const actualCost = Number(document.getElementById('close-maint-cost').value);
-
+  
+  const m = state.maintenance.find(l => l.id === maintId);
   const v = state.vehicles.find(veh => veh.id === vehId);
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    const resp = await authFetch(`${API_BASE}/maintenance/${maintId}/close`, {
-      method: 'PATCH',
-      body: JSON.stringify({ actual_cost: actualCost })
-    });
-
-    if (resp.ok) {
-      await tryFetchBackendData(); // Refresh maintenance/expenses/vehicle status from DB
-      closeAllModals();
-      renderMaintenance();
-      showToast(`Maintenance resolved. Vehicle ${v ? v.registration_number : ''} status restored to Available. Expense filed.`, 'success');
-    } else {
-      const data = await resp.json();
-      showToast(data.error || 'Failed to close maintenance record', 'error');
-    }
-  } catch (err) {
-    console.error(err);
-    showToast('Network error while closing maintenance.', 'error');
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
+  const todayStr = new Date().toISOString().split('T')[0];
+  
+  // Transition state
+  m.status = 'closed';
+  m.closed_at = todayStr;
+  m.cost = actualCost;
+  
+  // Restore vehicle status (unless retired)
+  if (v.status !== 'retired') {
+    v.status = 'available';
   }
+  
+  // Automatically record operation expense
+  const newExpId = state.expenses.length > 0 ? Math.max(...state.expenses.map(ex => ex.id)) + 1 : 1;
+  state.expenses.push({
+    id: newExpId,
+    vehicle_id: v.id,
+    trip_id: null,
+    category: 'maintenance',
+    description: `Service resolved (${m.type}): ${m.description}`,
+    amount: actualCost,
+    date: todayStr
+  });
+  
+  saveStateToLocal();
+  closeAllModals();
+  renderMaintenance();
+  showToast(`Maintenance resolved. Vehicle ${v.registration_number} status restored to Available. Expense filed.`, 'success');
 });
 
 document.getElementById('maintenance-search').addEventListener('input', renderMaintenance);
@@ -1406,7 +1406,7 @@ document.getElementById('btn-add-expense').addEventListener('click', () => {
 });
 
 // Submit Expense
-document.getElementById('expense-form').addEventListener('submit', async (e) => {
+document.getElementById('expense-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const vehId = Number(document.getElementById('exp-vehicle').value);
   const cat = document.getElementById('exp-category').value;
@@ -1415,31 +1415,22 @@ document.getElementById('expense-form').addEventListener('submit', async (e) => 
   const tripIdVal = document.getElementById('exp-trip').value;
   const tripId = tripIdVal ? Number(tripIdVal) : null;
   const desc = document.getElementById('exp-desc').value.trim();
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    const resp = await authFetch(`${API_BASE}/expenses`, {
-      method: 'POST',
-      body: JSON.stringify({ vehicle_id: vehId, trip_id: tripId, category: cat, description: desc, amount, date })
-    });
-
-    if (resp.ok) {
-      await tryFetchBackendData();
-      closeAllModals();
-      renderExpenses();
-      showToast('Expense recorded successfully.', 'success');
-    } else {
-      const data = await resp.json();
-      showToast(data.error || 'Failed to record expense', 'error');
-    }
-  } catch (err) {
-    console.error(err);
-    showToast('Network error while recording expense.', 'error');
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-  }
+  
+  const newId = state.expenses.length > 0 ? Math.max(...state.expenses.map(ex => ex.id)) + 1 : 1;
+  state.expenses.push({
+    id: newId,
+    vehicle_id: vehId,
+    trip_id: tripId,
+    category: cat,
+    description: desc,
+    amount: amount,
+    date: date
+  });
+  
+  saveStateToLocal();
+  closeAllModals();
+  renderExpenses();
+  showToast('Expense recorded successfully.', 'success');
 });
 
 // Add Fuel Log Modal open
@@ -1451,7 +1442,7 @@ document.getElementById('btn-add-fuel').addEventListener('click', () => {
 });
 
 // Submit Fuel Log
-document.getElementById('fuel-form').addEventListener('submit', async (e) => {
+document.getElementById('fuel-form').addEventListener('submit', (e) => {
   e.preventDefault();
   const vehId = Number(document.getElementById('fuel-vehicle').value);
   const date = document.getElementById('fuel-date').value;
@@ -1459,32 +1450,33 @@ document.getElementById('fuel-form').addEventListener('submit', async (e) => {
   const cost = Number(document.getElementById('fuel-cost').value);
   const tripIdVal = document.getElementById('fuel-trip').value;
   const tripId = tripIdVal ? Number(tripIdVal) : null;
-
-  const submitBtn = e.target.querySelector('button[type="submit"]');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    // Backend also auto-files the matching 'fuel' expense entry in the same transaction
-    const resp = await authFetch(`${API_BASE}/fuel`, {
-      method: 'POST',
-      body: JSON.stringify({ vehicle_id: vehId, trip_id: tripId, liters, cost, date })
-    });
-
-    if (resp.ok) {
-      await tryFetchBackendData();
-      closeAllModals();
-      renderExpenses();
-      showToast('Fuel refill logged and Operation Expense recorded.', 'success');
-    } else {
-      const data = await resp.json();
-      showToast(data.error || 'Failed to log fuel refill', 'error');
-    }
-  } catch (err) {
-    console.error(err);
-    showToast('Network error while logging fuel refill.', 'error');
-  } finally {
-    if (submitBtn) submitBtn.disabled = false;
-  }
+  
+  const newId = state.fuel.length > 0 ? Math.max(...state.fuel.map(f => f.id)) + 1 : 1;
+  state.fuel.push({
+    id: newId,
+    vehicle_id: vehId,
+    trip_id: tripId,
+    liters: liters,
+    cost: cost,
+    date: date
+  });
+  
+  // Automatically record fuel refill as operation expense
+  const newExpId = state.expenses.length > 0 ? Math.max(...state.expenses.map(ex => ex.id)) + 1 : 1;
+  state.expenses.push({
+    id: newExpId,
+    vehicle_id: vehId,
+    trip_id: tripId,
+    category: 'fuel',
+    description: `Fuel refill: ${liters} liters`,
+    amount: cost,
+    date: date
+  });
+  
+  saveStateToLocal();
+  closeAllModals();
+  renderExpenses();
+  showToast('Fuel refill logged and Operation Expense recorded.', 'success');
 });
 
 // --- REPORTS & ROI ---
