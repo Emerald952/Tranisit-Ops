@@ -121,61 +121,36 @@ document.addEventListener('DOMContentLoaded', async () => {
 // Fetch live data from backend (requires valid token)
 async function tryFetchBackendData() {
   try {
-    const [vehiclesResp, driversResp] = await Promise.all([
+    // Fetch all 3 core entities from PostgreSQL
+    const [vehiclesResp, driversResp, tripsResp] = await Promise.all([
       authFetch(`${API_BASE}/vehicles`),
       authFetch(`${API_BASE}/drivers`),
+      authFetch(`${API_BASE}/trips`) // <-- Added Trips!
     ]);
 
-    if (vehiclesResp.ok && driversResp.ok) {
-      const serverVehicles = await vehiclesResp.json();
-      const serverDrivers = await driversResp.json();
+    if (vehiclesResp.ok && driversResp.ok && tripsResp.ok) {
+      state.vehicles = await vehiclesResp.json();
+      state.drivers = await driversResp.json();
+      state.trips = await tripsResp.json(); 
 
       console.log('✅ Connected to live backend server successfully!');
       state.isUsingLiveBackend = true;
 
-      localStorage.setItem('vehicles', JSON.stringify(serverVehicles));
-      localStorage.setItem('drivers', JSON.stringify(serverDrivers));
-      initializeRemainingMockData();
-      localStorage.setItem('transitops_initialized', 'true');
+      // Temporary fallback for the modules that don't have a backend yet
+      state.maintenance = JSON.parse(localStorage.getItem('maintenance')) || MOCK_MAINTENANCE;
+      state.fuel = JSON.parse(localStorage.getItem('fuel')) || MOCK_FUEL;
+      state.expenses = JSON.parse(localStorage.getItem('expenses')) || MOCK_EXPENSES;
     } else {
       throw new Error('Backend responded with error');
     }
   } catch (err) {
-    console.warn('⚠️ Backend fetch failed. Using localStorage fallback.', err.message);
-    state.isUsingLiveBackend = false;
-
-    if (!localStorage.getItem('transitops_initialized')) {
-      localStorage.setItem('vehicles', JSON.stringify(MOCK_VEHICLES));
-      localStorage.setItem('drivers', JSON.stringify(MOCK_DRIVERS));
-      initializeRemainingMockData();
-      localStorage.setItem('transitops_initialized', 'true');
-    }
+    console.error('⚠️ Backend fetch failed.', err.message);
+    showToast('Failed to connect to the database.', 'error');
   }
-
-  // Load state from LocalStorage
-  loadStateFromLocal();
 }
 
-function initializeRemainingMockData() {
-  localStorage.setItem('trips', JSON.stringify(MOCK_TRIPS));
-  localStorage.setItem('maintenance', JSON.stringify(MOCK_MAINTENANCE));
-  localStorage.setItem('fuel', JSON.stringify(MOCK_FUEL));
-  localStorage.setItem('expenses', JSON.stringify(MOCK_EXPENSES));
-}
-
-function loadStateFromLocal() {
-  state.vehicles = JSON.parse(localStorage.getItem('vehicles')) || [];
-  state.drivers = JSON.parse(localStorage.getItem('drivers')) || [];
-  state.trips = JSON.parse(localStorage.getItem('trips')) || [];
-  state.maintenance = JSON.parse(localStorage.getItem('maintenance')) || [];
-  state.fuel = JSON.parse(localStorage.getItem('fuel')) || [];
-  state.expenses = JSON.parse(localStorage.getItem('expenses')) || [];
-}
-
+// Helper to save local modules (Maintenance/Fuel/Expenses)
 function saveStateToLocal() {
-  localStorage.setItem('vehicles', JSON.stringify(state.vehicles));
-  localStorage.setItem('drivers', JSON.stringify(state.drivers));
-  localStorage.setItem('trips', JSON.stringify(state.trips));
   localStorage.setItem('maintenance', JSON.stringify(state.maintenance));
   localStorage.setItem('fuel', JSON.stringify(state.fuel));
   localStorage.setItem('expenses', JSON.stringify(state.expenses));
@@ -611,8 +586,8 @@ document.getElementById('btn-add-vehicle').addEventListener('click', () => {
   openModal('modal-vehicle');
 });
 
-// Submit vehicle form
-document.getElementById('vehicle-form').addEventListener('submit', (e) => {
+// Submit vehicle form (Rewired for Backend API)
+document.getElementById('vehicle-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const idVal = document.getElementById('vehicle-form-id').value;
   const regNum = document.getElementById('vehicle-reg').value.trim().toUpperCase();
@@ -623,31 +598,58 @@ document.getElementById('vehicle-form').addEventListener('submit', (e) => {
   const cost = Number(document.getElementById('vehicle-cost').value);
   const region = document.getElementById('vehicle-region').value.trim();
   const status = document.getElementById('vehicle-status').value;
-  
-  // Check registration number uniqueness (rule 1)
-  const duplicate = state.vehicles.find(v => v.registration_number === regNum && v.id !== Number(idVal));
-  if (duplicate) {
-    showToast(`Vehicle with Registration Number "${regNum}" already exists!`, 'error');
-    return;
-  }
-  
-  if (idVal) {
-    // Edit
-    const idx = state.vehicles.findIndex(v => v.id === Number(idVal));
-    if (idx !== -1) {
-      state.vehicles[idx] = { ...state.vehicles[idx], name_model: model, type, max_load_capacity: capacity, odometer, acquisition_cost: cost, region, status };
-      showToast('Vehicle configuration updated.', 'success');
+
+  const payload = {
+    registration_number: regNum,
+    name_model: model,
+    type,
+    max_load_capacity: capacity,
+    odometer,
+    acquisition_cost: cost,
+    region,
+    status
+  };
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const originalText = submitBtn.textContent;
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving...';
+
+  try {
+    let resp, data;
+    if (idVal) {
+      // Edit -> PUT request
+      resp = await authFetch(`${API_BASE}/vehicles/${idVal}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+    } else {
+      // Create -> POST request
+      resp = await authFetch(`${API_BASE}/vehicles`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
     }
-  } else {
-    // Create new
-    const newId = state.vehicles.length > 0 ? Math.max(...state.vehicles.map(v => v.id)) + 1 : 1;
-    state.vehicles.push({ id: newId, registration_number: regNum, name_model: model, type, max_load_capacity: capacity, odometer, acquisition_cost: cost, status, region });
-    showToast('New vehicle registered successfully.', 'success');
+
+    data = await resp.json();
+
+    if (resp.ok) {
+      showToast(`Vehicle ${idVal ? 'updated' : 'registered'} successfully.`, 'success');
+      // Sync state with live database
+      const listResp = await authFetch(`${API_BASE}/vehicles`);
+      state.vehicles = await listResp.json();
+      renderVehicles();
+      closeAllModals();
+    } else {
+      showToast(data.error || 'Failed to save vehicle.', 'error');
+    }
+  } catch (err) {
+    console.error('Vehicle save error:', err);
+    showToast('Network error while saving vehicle.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = originalText;
   }
-  
-  saveStateToLocal();
-  closeAllModals();
-  renderVehicles();
 });
 
 window.editVehicle = function(id) {
@@ -669,15 +671,24 @@ window.editVehicle = function(id) {
   openModal('modal-vehicle');
 };
 
-window.deleteVehicle = function(id) {
-  // Confirm deletion
+// Delete vehicle (Rewired for Backend API)
+window.deleteVehicle = async function(id) {
   if (confirm('Are you sure you want to delete this vehicle? This will block operations associated with it.')) {
-    const idx = state.vehicles.findIndex(v => v.id === id);
-    if (idx !== -1) {
-      state.vehicles.splice(idx, 1);
-      saveStateToLocal();
-      renderVehicles();
-      showToast('Vehicle deleted successfully.', 'info');
+    try {
+      const resp = await authFetch(`${API_BASE}/vehicles/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        state.vehicles = state.vehicles.filter(v => v.id !== id);
+        renderVehicles();
+        showToast('Vehicle deleted successfully.', 'info');
+      } else {
+        // This will display the 400 error if it is attached to a trip
+        showToast(data.error || 'Failed to delete vehicle.', 'error');
+      }
+    } catch (err) {
+      console.error('Delete error:', err);
+      showToast('Network error while deleting vehicle.', 'error');
     }
   }
 };
@@ -737,8 +748,8 @@ document.getElementById('btn-add-driver').addEventListener('click', () => {
   openModal('modal-driver');
 });
 
-// Submit driver form
-document.getElementById('driver-form').addEventListener('submit', (e) => {
+// Submit driver form (Rewired for Backend API)
+document.getElementById('driver-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const idVal = document.getElementById('driver-form-id').value;
   const name = document.getElementById('driver-name').value.trim();
@@ -748,31 +759,54 @@ document.getElementById('driver-form').addEventListener('submit', (e) => {
   const contact = document.getElementById('driver-contact').value.trim();
   const score = Number(document.getElementById('driver-score').value || 100);
   const status = document.getElementById('driver-status').value;
-  
-  // Unique license (rule 1 equivalent)
-  const duplicate = state.drivers.find(d => d.license_number === license && d.id !== Number(idVal));
-  if (duplicate) {
-    showToast(`Driver with License Number "${license}" already registered!`, 'error');
-    return;
-  }
-  
-  if (idVal) {
-    // Edit
-    const idx = state.drivers.findIndex(d => d.id === Number(idVal));
-    if (idx !== -1) {
-      state.drivers[idx] = { ...state.drivers[idx], name, license_number: license, license_category: category, license_expiry_date: expiry, contact_number: contact, safety_score: score, status };
-      showToast('Driver profile updated.', 'success');
+
+  const payload = {
+    name,
+    license_number: license,
+    license_category: category,
+    license_expiry_date: expiry,
+    contact_number: contact,
+    safety_score: score,
+    status
+  };
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  const originalText = submitBtn.textContent;
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Saving...';
+
+  try {
+    let resp, data;
+    if (idVal) {
+      resp = await authFetch(`${API_BASE}/drivers/${idVal}`, {
+        method: 'PUT',
+        body: JSON.stringify(payload)
+      });
+    } else {
+      resp = await authFetch(`${API_BASE}/drivers`, {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
     }
-  } else {
-    // Create new
-    const newId = state.drivers.length > 0 ? Math.max(...state.drivers.map(d => d.id)) + 1 : 1;
-    state.drivers.push({ id: newId, name, license_number: license, license_category: category, license_expiry_date: expiry, contact_number: contact, safety_score: score, status });
-    showToast('New driver registered.', 'success');
+
+    data = await resp.json();
+
+    if (resp.ok) {
+      showToast(`Driver ${idVal ? 'updated' : 'registered'} successfully.`, 'success');
+      const listResp = await authFetch(`${API_BASE}/drivers`);
+      state.drivers = await listResp.json();
+      renderDrivers();
+      closeAllModals();
+    } else {
+      showToast(data.error || 'Failed to save driver.', 'error');
+    }
+  } catch (err) {
+    console.error('Driver save error:', err);
+    showToast('Network error while saving driver.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = originalText;
   }
-  
-  saveStateToLocal();
-  closeAllModals();
-  renderDrivers();
 });
 
 window.editDriver = function(id) {
@@ -792,14 +826,23 @@ window.editDriver = function(id) {
   openModal('modal-driver');
 };
 
-window.deleteDriver = function(id) {
+// Delete driver (Rewired for Backend API)
+window.deleteDriver = async function(id) {
   if (confirm('Are you sure you want to remove this driver profile?')) {
-    const idx = state.drivers.findIndex(d => d.id === id);
-    if (idx !== -1) {
-      state.drivers.splice(idx, 1);
-      saveStateToLocal();
-      renderDrivers();
-      showToast('Driver profile deleted.', 'info');
+    try {
+      const resp = await authFetch(`${API_BASE}/drivers/${id}`, { method: 'DELETE' });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        state.drivers = state.drivers.filter(d => d.id !== id);
+        renderDrivers();
+        showToast('Driver profile deleted.', 'info');
+      } else {
+        showToast(data.error || 'Failed to delete driver.', 'error');
+      }
+    } catch (err) {
+      console.error('Delete error:', err);
+      showToast('Network error while deleting driver.', 'error');
     }
   }
 };
@@ -919,8 +962,8 @@ function checkCargoCapacity() {
   return true;
 }
 
-// Create trip submit
-document.getElementById('trip-form').addEventListener('submit', (e) => {
+// Create trip submit (Rewired for Backend API)
+document.getElementById('trip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   
   if (!checkCargoCapacity()) {
@@ -928,36 +971,41 @@ document.getElementById('trip-form').addEventListener('submit', (e) => {
     return;
   }
   
-  const src = document.getElementById('trip-source').value.trim();
-  const dest = document.getElementById('trip-destination').value.trim();
-  const vehId = Number(document.getElementById('trip-vehicle').value);
-  const drvId = Number(document.getElementById('trip-driver').value);
-  const cargo = Number(document.getElementById('trip-cargo').value);
-  const distance = Number(document.getElementById('trip-distance').value);
-  
-  const newId = state.trips.length > 0 ? Math.max(...state.trips.map(t => t.id)) + 1 : 1;
-  
-  const newTrip = {
-    id: newId,
-    source: src,
-    destination: dest,
-    vehicle_id: vehId,
-    driver_id: drvId,
-    cargo_weight: cargo,
-    planned_distance: distance,
-    actual_distance: null,
-    fuel_consumed: null,
-    final_odometer: null,
-    status: 'draft',
-    dispatched_at: null,
-    completed_at: null
+  const payload = {
+    source: document.getElementById('trip-source').value.trim(),
+    destination: document.getElementById('trip-destination').value.trim(),
+    vehicle_id: Number(document.getElementById('trip-vehicle').value),
+    driver_id: Number(document.getElementById('trip-driver').value),
+    cargo_weight: Number(document.getElementById('trip-cargo').value),
+    planned_distance: Number(document.getElementById('trip-distance').value)
   };
   
-  state.trips.push(newTrip);
-  saveStateToLocal();
-  closeAllModals();
-  renderTrips();
-  showToast(`Trip #TR-${newId} created in Draft status. Ready to dispatch.`, 'success');
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Dispatching...';
+
+  try {
+    const resp = await authFetch(`${API_BASE}/trips`, { 
+      method: 'POST', 
+      body: JSON.stringify(payload) 
+    });
+    
+    if (resp.ok) {
+      showToast('Trip created and dispatched successfully!', 'success');
+      await tryFetchBackendData(); // Reloads everything to get updated vehicle/driver statuses
+      closeAllModals();
+      renderTrips();
+    } else {
+      const data = await resp.json();
+      showToast(data.error || 'Failed to create trip', 'error');
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Network error while creating trip.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Create Trip';
+  }
 });
 
 // Dispatch Trip (rule 6)
@@ -1009,21 +1057,17 @@ window.openCompleteTripModal = function(id) {
   openModal('modal-complete-trip');
 };
 
-// Complete trip form submit (rule 7)
-document.getElementById('complete-trip-form').addEventListener('submit', (e) => {
+// Complete trip form submit (Rewired for Backend API)
+document.getElementById('complete-trip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   
   const tripId = Number(document.getElementById('complete-trip-id').value);
   const vehId = Number(document.getElementById('complete-vehicle-id').value);
   const actualDist = Number(document.getElementById('complete-actual-dist').value);
   const fuelConsumed = Number(document.getElementById('complete-fuel-consumed').value);
-  const fuelCost = Number(document.getElementById('complete-fuel-cost').value);
   const finalOdo = Number(document.getElementById('complete-final-odo').value);
   
-  const trip = state.trips.find(t => t.id === tripId);
   const v = state.vehicles.find(veh => veh.id === vehId);
-  const d = state.drivers.find(drv => drv.id === trip.driver_id);
-  
   if (finalOdo <= v.odometer) {
     const warning = document.getElementById('complete-odo-warning');
     warning.style.display = 'block';
@@ -1031,67 +1075,56 @@ document.getElementById('complete-trip-form').addEventListener('submit', (e) => 
     return;
   }
   
-  // Update trip lifecycle
-  trip.status = 'completed';
-  trip.completed_at = new Date().toLocaleString();
-  trip.actual_distance = actualDist;
-  trip.fuel_consumed = fuelConsumed;
-  trip.final_odometer = finalOdo;
-  
-  // Restore statuses back to Available & update odometer
-  v.status = 'available';
-  v.odometer = finalOdo;
-  d.status = 'available';
-  
-  // Auto-refill fuel log
-  const newFuelId = state.fuel.length > 0 ? Math.max(...state.fuel.map(f => f.id)) + 1 : 1;
-  const todayStr = new Date().toISOString().split('T')[0];
-  state.fuel.push({
-    id: newFuelId,
-    vehicle_id: v.id,
-    trip_id: trip.id,
-    liters: fuelConsumed,
-    cost: fuelCost,
-    date: todayStr
-  });
-  
-  // Auto-record expense
-  const newExpId = state.expenses.length > 0 ? Math.max(...state.expenses.map(ex => ex.id)) + 1 : 1;
-  state.expenses.push({
-    id: newExpId,
-    vehicle_id: v.id,
-    trip_id: trip.id,
-    category: 'fuel',
-    description: `Fuel refill for trip TR-${trip.id} to ${trip.destination}`,
-    amount: fuelCost,
-    date: todayStr
-  });
-  
-  saveStateToLocal();
-  closeAllModals();
-  renderTrips();
-  showToast(`Trip #TR-${tripId} marked Completed! Vehicle & Driver restored to Available. Fuel and Expense logged.`, 'success');
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Completing...';
+
+  try {
+    const resp = await authFetch(`${API_BASE}/trips/${tripId}/complete`, {
+      method: 'PATCH',
+      body: JSON.stringify({ 
+        actual_distance: actualDist, 
+        fuel_consumed: fuelConsumed, 
+        final_odometer: finalOdo 
+      })
+    });
+    
+    if (resp.ok) {
+      showToast(`Trip #TR-${tripId} marked Completed! Vehicle & Driver restored to Available.`, 'success');
+      await tryFetchBackendData(); // Refresh statuses and new odometer reading
+      closeAllModals();
+      renderTrips();
+    } else {
+      const data = await resp.json();
+      showToast(data.error || 'Failed to complete trip', 'error');
+    }
+  } catch (err) {
+    console.error(err);
+    showToast('Network error while completing trip.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Complete Trip';
+  }
 });
 
-// Cancel active trip (rule 8)
-window.cancelTrip = function(id) {
+// Cancel active trip (Rewired for Backend API)
+window.cancelTrip = async function(id) {
   if (confirm(`Are you sure you want to cancel Trip #TR-${id}?`)) {
-    const trip = state.trips.find(t => t.id === id);
-    if (!trip) return;
-    
-    const v = state.vehicles.find(veh => veh.id === trip.vehicle_id);
-    const d = state.drivers.find(drv => drv.id === trip.driver_id);
-    
-    trip.status = 'cancelled';
-    trip.completed_at = new Date().toLocaleString();
-    
-    // Restores statuses
-    if (v) v.status = 'available';
-    if (d) d.status = 'available';
-    
-    saveStateToLocal();
-    renderTrips();
-    showToast(`Trip #TR-${id} cancelled. Vehicle & Driver restored to Available.`, 'info');
+    try {
+      const resp = await authFetch(`${API_BASE}/trips/${id}/cancel`, { method: 'PATCH' });
+      
+      if (resp.ok) {
+        showToast(`Trip #TR-${id} cancelled. Vehicle & Driver restored to Available.`, 'info');
+        await tryFetchBackendData(); // Refresh statuses back to available
+        renderTrips();
+      } else {
+        const data = await resp.json();
+        showToast(data.error || 'Failed to cancel trip', 'error');
+      }
+    } catch (err) {
+      console.error(err);
+      showToast('Network error while cancelling trip.', 'error');
+    }
   }
 };
 

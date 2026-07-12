@@ -260,6 +260,197 @@ app.post('/api/trips', async (req, res) => {
   }
 });
 
+// GET /api/trips — Load all trips
+app.get('/api/trips', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT * FROM trips ORDER BY created_at DESC');
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Fetch trips error:', err.message);
+    res.status(500).json({ error: 'Failed to fetch trips' });
+  }
+});
+
+// PATCH /api/trips/:id/complete — Complete a trip safely
+app.patch('/api/trips/:id/complete', async (req, res) => {
+  const { id } = req.params;
+  const { actual_distance, fuel_consumed, final_odometer } = req.body;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const tripRes = await client.query('SELECT vehicle_id, driver_id FROM trips WHERE id = $1', [id]);
+    if (tripRes.rows.length === 0) throw new Error('Trip not found');
+    const trip = tripRes.rows[0];
+
+    // Mark trip completed
+    await client.query(
+      `UPDATE trips SET status = 'completed', completed_at = NOW(), actual_distance = $1, fuel_consumed = $2, final_odometer = $3 WHERE id = $4`,
+      [actual_distance, fuel_consumed, final_odometer, id]
+    );
+
+    // Free up vehicle and update its odometer
+    await client.query(`UPDATE vehicles SET status = 'available', odometer = $1 WHERE id = $2`, [final_odometer, trip.vehicle_id]);
+    
+    // Free up driver
+    await client.query(`UPDATE drivers SET status = 'available' WHERE id = $1`, [trip.driver_id]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Trip completed successfully' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Complete trip error:', err.message);
+    res.status(500).json({ error: 'Failed to complete trip' });
+  } finally {
+    client.release();
+  }
+});
+
+// PATCH /api/trips/:id/cancel — Cancel an active trip safely
+app.patch('/api/trips/:id/cancel', async (req, res) => {
+  const { id } = req.params;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const tripRes = await client.query('SELECT vehicle_id, driver_id FROM trips WHERE id = $1', [id]);
+    if (tripRes.rows.length === 0) throw new Error('Trip not found');
+    const trip = tripRes.rows[0];
+
+    // Mark trip cancelled
+    await client.query(`UPDATE trips SET status = 'cancelled', completed_at = NOW() WHERE id = $1`, [id]);
+
+    // Free up vehicle and driver without updating odometer
+    await client.query(`UPDATE vehicles SET status = 'available' WHERE id = $1`, [trip.vehicle_id]);
+    await client.query(`UPDATE drivers SET status = 'available' WHERE id = $1`, [trip.driver_id]);
+
+    await client.query('COMMIT');
+    res.json({ message: 'Trip cancelled' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('Cancel trip error:', err.message);
+    res.status(500).json({ error: 'Failed to cancel trip' });
+  } finally {
+    client.release();
+  }
+});
+
+// VEHICLE CRUD ROUTES (Requires Token)
+
+// POST /api/vehicles — Add a new vehicle
+app.post('/api/vehicles', async (req, res) => {
+  const { registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO vehicles (registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+      [registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status || 'available', region]
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    // 23505 is the PostgreSQL error code for Unique Constraint Violation
+    if (err.code === '23505') {
+      return res.status(400).json({ error: `Vehicle with registration '${registration_number}' already exists.` });
+    }
+    console.error('Add vehicle error:', err.message);
+    res.status(500).json({ error: 'Failed to add vehicle' });
+  }
+});
+
+// PUT /api/vehicles/:id — Update an existing vehicle
+app.put('/api/vehicles/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name_model, type, max_load_capacity, odometer, acquisition_cost, status, region } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE vehicles
+       SET name_model = $1, type = $2, max_load_capacity = $3, odometer = $4, acquisition_cost = $5, status = $6, region = $7
+       WHERE id = $8 RETURNING *`,
+      [name_model, type, max_load_capacity, odometer, acquisition_cost, status, region, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Update vehicle error:', err.message);
+    res.status(500).json({ error: 'Failed to update vehicle' });
+  }
+});
+
+// DELETE /api/vehicles/:id — Delete a vehicle safely
+app.delete('/api/vehicles/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query('DELETE FROM vehicles WHERE id = $1 RETURNING id', [id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Vehicle not found' });
+    res.json({ message: 'Vehicle deleted successfully' });
+  } catch (err) {
+    // 23503 is the PostgreSQL error code for Foreign Key Violation
+    if (err.code === '23503') {
+      return res.status(400).json({ error: 'Cannot delete vehicle: It is linked to existing trips, fuel logs, or maintenance records. Please retire the vehicle instead.' });
+    }
+    console.error('Delete vehicle error:', err.message);
+    res.status(500).json({ error: 'Failed to delete vehicle' });
+  }
+});
+
+// DRIVER CRUD ROUTES (Requires Token)
+
+// POST /api/drivers — Add a new driver
+app.post('/api/drivers', async (req, res) => {
+  const { name, license_number, license_category, license_expiry_date, contact_number, safety_score, status } = req.body;
+  try {
+    const result = await pool.query(
+      `INSERT INTO drivers (name, license_number, license_category, license_expiry_date, contact_number, safety_score, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [name, license_number, license_category, license_expiry_date, contact_number, safety_score || 100, status || 'available']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({ error: `Driver with license '${license_number}' already exists.` });
+    }
+    console.error('Add driver error:', err.message);
+    res.status(500).json({ error: 'Failed to add driver' });
+  }
+});
+
+// PUT /api/drivers/:id — Update an existing driver
+app.put('/api/drivers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, license_category, license_expiry_date, contact_number, safety_score, status } = req.body;
+  try {
+    const result = await pool.query(
+      `UPDATE drivers
+       SET name = $1, license_category = $2, license_expiry_date = $3, contact_number = $4, safety_score = $5, status = $6
+       WHERE id = $7 RETURNING *`,
+      [name, license_category, license_expiry_date, contact_number, safety_score, status, id]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Update driver error:', err.message);
+    res.status(500).json({ error: 'Failed to update driver' });
+  }
+});
+
+// DELETE /api/drivers/:id — Delete a driver safely
+app.delete('/api/drivers/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query('DELETE FROM drivers WHERE id = $1 RETURNING id', [id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Driver not found' });
+    res.json({ message: 'Driver deleted successfully' });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(400).json({ error: 'Cannot delete driver: They are linked to existing trips. Suspend the driver instead.' });
+    }
+    console.error('Delete driver error:', err.message);
+    res.status(500).json({ error: 'Failed to delete driver' });
+  }
+});
+
 // API HEALTH CHECK
 app.get('/', (req, res) => {
   res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
