@@ -112,7 +112,9 @@ CREATE TABLE vehicles (
     status                vehicle_status NOT NULL DEFAULT 'available',
     region                VARCHAR(100),
     created_at            TIMESTAMP      NOT NULL DEFAULT NOW(),
-    updated_at            TIMESTAMP      NOT NULL DEFAULT NOW()
+    updated_at            TIMESTAMP      NOT NULL DEFAULT NOW(),
+    current_lat 	  NUMERIC(9, 6),
+    current_lng		  NUMERIC(9, 6)
 );
 
 CREATE INDEX idx_vehicles_status ON vehicles (status);

@@ -46,22 +46,22 @@ async function seed() {
 
     // Vehicles 
     const vehiclesData = [
-      // [registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region]
-      ['MH-12-AB-1234', 'Tata Ace Gold',       'truck', 1500,  45200, 850000,  'available', 'Maharashtra'],
-      ['KA-01-CD-5678', 'Ashok Leyland Dost',  'truck', 2500,  78300, 1200000, 'on_trip',   'Karnataka'],
-      ['DL-10-EF-9012', 'Maruti Eeco Cargo',   'van',   700,   32100, 520000,  'available', 'Delhi NCR'],
-      ['TN-07-GH-3456', 'Force Traveller',     'bus',   3000,  95600, 1800000, 'in_shop',   'Tamil Nadu'],
-      ['GJ-05-IJ-7890', 'Mahindra Bolero Pickup', 'car', 1000, 61400, 780000,  'available', 'Gujarat'],
-      ['RJ-14-KL-2345', 'BharatBenz 1015R',    'truck', 5000,  120800, 2500000, 'available', 'Rajasthan'],
-      ['UP-32-MN-6789', 'Tata Winger',         'van',   800,   28900, 620000,  'on_trip',   'Uttar Pradesh'],
-      ['MH-04-OP-1122', 'Eicher Pro 2049',     'truck', 4000,  88500, 1950000, 'available', 'Maharashtra'],
+      // [registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region, curr_lat, curr_lng]
+      ['MH-12-AB-1234', 'Tata Ace Gold',       'truck', 1500,  45200, 850000,  'available', 'Maharashtra',  19.0760, 72.8777],
+      ['KA-01-CD-5678', 'Ashok Leyland Dost',  'truck', 2500,  78300, 1200000, 'on_trip',   'Karnataka',    12.9716, 77.5946],
+      ['DL-10-EF-9012', 'Maruti Eeco Cargo',   'van',   700,   32100, 520000,  'available', 'Delhi NCR',    28.6139, 77.2090],
+      ['TN-07-GH-3456', 'Force Traveller',     'bus',   3000,  95600, 1800000, 'in_shop',   'Tamil Nadu',   13.0827, 80.2707],
+      ['GJ-05-IJ-7890', 'Mahindra Bolero Pickup', 'car', 1000, 61400, 780000,  'available', 'Gujarat',      23.0225, 72.5714],
+      ['RJ-14-KL-2345', 'BharatBenz 1015R',    'truck', 5000,  120800, 2500000, 'available', 'Rajasthan',   26.9124, 75.7873],
+      ['UP-32-MN-6789', 'Tata Winger',         'van',   800,   28900, 620000,  'on_trip',   'Uttar Pradesh',26.8467, 80.9462],
+      ['MH-04-OP-1122', 'Eicher Pro 2049',     'truck', 4000,  88500, 1950000, 'available', 'Maharashtra',  18.5204, 73.8567],
     ];
 
-    for (const [reg, name, type, cap, odo, cost, status, region] of vehiclesData) {
+    for (const [reg, name, type, cap, odo, cost, status, region, current_lat, current_lng] of vehiclesData) {
       await client.query(
-        `INSERT INTO vehicles (registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [reg, name, type, cap, odo, cost, status, region]
+        `INSERT INTO vehicles (registration_number, name_model, type, max_load_capacity, odometer, acquisition_cost, status, region, current_lat, current_lng)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [reg, name, type, cap, odo, cost, status, region, current_lat, current_lng]
       );
     }
     console.log(`✅ Vehicles seeded (${vehiclesData.length})`);
