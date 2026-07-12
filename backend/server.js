@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const path = require('path');
 
 const app = express();
 const PORT = 3000;
@@ -8,6 +9,8 @@ const PORT = 3000;
 // MIDDLEWARE CONFIG
 app.use(cors());
 app.use(express.json());
+
+app.use(express.static(path.join(__dirname, '..', 'frontend')));
 
 // DATABASE CONNECTION POOL
 const pool = new Pool({
@@ -17,6 +20,7 @@ const pool = new Pool({
   password: 'postgres',
   port: 5432,
 });
+
 
 // Verify DB connection on startup
 pool.query('SELECT NOW()')
@@ -72,7 +76,7 @@ app.get('/api/drivers', async (req, res) => {
 
 // API HEALTH CHECK
 app.get('/', (req, res) => {
-  res.json({ status: 'Server running' });
+  res.sendFile(path.join(__dirname, '..', 'frontend', 'index.html'));
 });
 
 // START SERVER

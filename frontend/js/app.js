@@ -1497,3 +1497,52 @@ document.getElementById('btn-export-reports').addEventListener('click', () => {
   document.body.removeChild(link);
   showToast('Reports table exported to CSV.', 'success');
 });
+
+// Intial Pos: Leaflet Map Centered on India
+const map = L.map('map').setView([20.5937, 78.9629], 5);
+
+// OpenStreetMap Tile Layers
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 18,
+    attribution: '© OpenStreetMap contributors'
+}).addTo(map);
+
+setTimeout(() => {
+  map.invalidateSize();
+}, 200);
+
+let mapMarkers = [];
+
+// Fetch vehicle locations from the backend database
+async function updateFleetTelemetryMap() {
+    try {
+        const response = await fetch('http://localhost:3000/api/vehicles');
+        const vehicles = await response.json();
+
+        mapMarkers.forEach(marker => map.removeLayer(marker));
+        mapMarkers = [];
+
+        vehicles.forEach(vehicle => {
+            if (vehicle.current_lat && vehicle.current_lng) {
+                const marker = L.marker([parseFloat(vehicle.current_lat), parseFloat(vehicle.current_lng)])
+                    .addTo(map)
+                    .bindPopup(`
+                        <strong>${vehicle.model_name || vehicle.registration_number}</strong><br/>
+                        🆔 Reg: ${vehicle.registration_number}<br/>
+                        📊 Status: <strong>${vehicle.status}</strong><br/>
+                        📍 Region: ${vehicle.region}
+                    `);
+                mapMarkers.push(marker);
+            }
+        });
+    } catch (error) {
+        console.error("❌ Failed to update map telemetry:", error);
+    }
+}
+
+// Fire telemetry compilation on startup
+document.addEventListener("DOMContentLoaded", () => {
+    updateFleetTelemetryMap();
+    
+    setInterval(updateFleetTelemetryMap, 30000);
+});
