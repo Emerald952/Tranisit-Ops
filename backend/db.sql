@@ -1,5 +1,4 @@
 -- ============================================================
--- TransitOps — Smart Transport Operations Platform
 -- PostgreSQL Database Schema
 -- ============================================================
 

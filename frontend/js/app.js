@@ -1,8 +1,27 @@
-// ==========================================
-// TransitOps — Core Frontend Application Logic
-// ==========================================
-
 const API_BASE = 'http://localhost:3000/api';
+
+// Auth Utilities 
+function getToken() {
+  return sessionStorage.getItem('transitops_token');
+}
+
+function clearSession() {
+  sessionStorage.removeItem('transitops_token');
+  sessionStorage.removeItem('transitops_user');
+}
+
+// Authenticated fetch wrapper — attaches JWT to every request
+async function authFetch(url, options = {}) {
+  const token = getToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return fetch(url, { ...options, headers });
+}
 
 // Fallback Mock Seed Data
 const MOCK_VEHICLES = [
@@ -88,57 +107,51 @@ let state = {
   isUsingLiveBackend: false
 };
 
-// ==========================================
+
 // 1. INITIALIZATION & DATA LOADING
-// ==========================================
 
 document.addEventListener('DOMContentLoaded', async () => {
   initTheme();
   setupEventListeners();
   
-  // Try loading from live backend first
-  await tryFetchBackendData();
-  
-  // Check auth session
-  checkAuth();
+  // Check if user has a valid token — restore session
+  await checkAuth();
 });
 
-// Try to fetch from backend, fallback to LocalStorage
+// Fetch live data from backend (requires valid token)
 async function tryFetchBackendData() {
   try {
-    const response = await fetch(`${API_BASE}/vehicles`, { mode: 'cors' });
-    if (response.ok) {
-      const serverVehicles = await response.json();
-      const driversResp = await fetch(`${API_BASE}/drivers`, { mode: 'cors' });
-      const serverDrivers = driversResp.ok ? await driversResp.json() : [];
-      
+    const [vehiclesResp, driversResp] = await Promise.all([
+      authFetch(`${API_BASE}/vehicles`),
+      authFetch(`${API_BASE}/drivers`),
+    ]);
+
+    if (vehiclesResp.ok && driversResp.ok) {
+      const serverVehicles = await vehiclesResp.json();
+      const serverDrivers = await driversResp.json();
+
       console.log('✅ Connected to live backend server successfully!');
       state.isUsingLiveBackend = true;
-      
-      // If we haven't initialized localStorage with local additions, populate it with backend data
-      if (!localStorage.getItem('transitops_initialized')) {
-        localStorage.setItem('vehicles', JSON.stringify(serverVehicles));
-        localStorage.setItem('drivers', JSON.stringify(serverDrivers));
-        initializeRemainingMockData();
-        localStorage.setItem('transitops_initialized', 'true');
-        showToast('Connected to live server. Initialized database.', 'success');
-      }
+
+      localStorage.setItem('vehicles', JSON.stringify(serverVehicles));
+      localStorage.setItem('drivers', JSON.stringify(serverDrivers));
+      initializeRemainingMockData();
+      localStorage.setItem('transitops_initialized', 'true');
     } else {
       throw new Error('Backend responded with error');
     }
   } catch (err) {
-    console.warn('⚠️ Backend connection failed. Running in Local Storage Mock mode.', err.message);
+    console.warn('⚠️ Backend fetch failed. Using localStorage fallback.', err.message);
     state.isUsingLiveBackend = false;
-    
+
     if (!localStorage.getItem('transitops_initialized')) {
       localStorage.setItem('vehicles', JSON.stringify(MOCK_VEHICLES));
       localStorage.setItem('drivers', JSON.stringify(MOCK_DRIVERS));
       initializeRemainingMockData();
       localStorage.setItem('transitops_initialized', 'true');
-      showToast('Offline Database Initialized.', 'warning');
     }
   }
-  
+
   // Load state from LocalStorage
   loadStateFromLocal();
 }
@@ -172,26 +185,55 @@ function saveStateToLocal() {
 // 2. AUTHENTICATION & RBAC
 // ==========================================
 
-function checkAuth() {
-  const sessionUser = sessionStorage.getItem('transitops_user');
-  if (sessionUser) {
-    state.user = JSON.parse(sessionUser);
-    document.getElementById('auth-container').style.display = 'none';
-    document.getElementById('app-container').style.display = 'flex';
-    
-    // Display header details
-    document.getElementById('header-user-name').textContent = state.user.full_name;
-    document.getElementById('header-user-role').textContent = formatRole(state.user.role);
-    
-    // Apply Role-Based Access controls
-    applyRoleBasedUI(state.user.role);
-    
-    // Initial Render
-    switchView(state.activeView);
-  } else {
-    document.getElementById('auth-container').style.display = 'flex';
-    document.getElementById('app-container').style.display = 'none';
+async function checkAuth() {
+  const token = getToken();
+
+  if (token) {
+    try {
+      // Verify token is still valid by calling /api/auth/me
+      const resp = await authFetch(`${API_BASE}/auth/me`);
+      if (resp.ok) {
+        const user = await resp.json();
+        state.user = user;
+        sessionStorage.setItem('transitops_user', JSON.stringify(user));
+
+        document.getElementById('auth-container').style.display = 'none';
+        document.getElementById('app-container').style.display = 'flex';
+
+        // Display header details
+        document.getElementById('header-user-name').textContent = state.user.full_name;
+        document.getElementById('header-user-role').textContent = formatRole(state.user.role);
+
+        // Apply Role-Based Access controls
+        applyRoleBasedUI(state.user.role);
+
+        // Load backend data now that we're authenticated
+        await tryFetchBackendData();
+
+        // Initial Render
+        switchView(state.activeView);
+        return;
+      }
+    } catch (err) {
+      console.warn('Token verification failed:', err.message);
+    }
+
+    // Token was invalid or expired — clear it
+    clearSession();
   }
+
+  // Not authenticated — show login
+  document.getElementById('auth-container').style.display = 'flex';
+  document.getElementById('app-container').style.display = 'none';
+
+  // Still load mock data so login screen is ready
+  if (!localStorage.getItem('transitops_initialized')) {
+    localStorage.setItem('vehicles', JSON.stringify(MOCK_VEHICLES));
+    localStorage.setItem('drivers', JSON.stringify(MOCK_DRIVERS));
+    initializeRemainingMockData();
+    localStorage.setItem('transitops_initialized', 'true');
+  }
+  loadStateFromLocal();
 }
 
 function applyRoleBasedUI(role) {
@@ -234,45 +276,58 @@ function formatRole(role) {
   return role.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
-// Handle Login Form Submit
-document.getElementById('login-form').addEventListener('submit', (e) => {
+// Handle Login Form Submit — calls backend POST /api/auth/login
+document.getElementById('login-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const email = document.getElementById('login-email').value.trim();
-  const pass = document.getElementById('login-password').value;
-  
-  // Simple Mock Login Logic based on seed data
-  let userDetails = null;
-  if (email === 'fleet@transitops.com' && pass === 'password123') {
-    userDetails = { email, full_name: 'Alice Manager', role: 'fleet_manager' };
-  } else if (email === 'driver@transitops.com' && pass === 'password123') {
-    userDetails = { email, full_name: 'Bob Driver', role: 'driver' };
-  } else if (email === 'safety@transitops.com' && pass === 'password123') {
-    userDetails = { email, full_name: 'Eve Officer', role: 'safety_officer' };
-  } else if (email === 'finance@transitops.com' && pass === 'password123') {
-    userDetails = { email, full_name: 'Trent Analyst', role: 'financial_analyst' };
-  }
-  
-  if (userDetails) {
-    sessionStorage.setItem('transitops_user', JSON.stringify(userDetails));
-    document.getElementById('login-email').value = '';
-    document.getElementById('login-password').value = '';
-    showToast(`Logged in as ${userDetails.full_name}`, 'success');
-    checkAuth();
-  } else {
-    showToast('Invalid email or password combination.', 'error');
+  const password = document.getElementById('login-password').value;
+
+  const submitBtn = e.target.querySelector('button[type="submit"]');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Signing in...';
+
+  try {
+    const resp = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    });
+
+    const data = await resp.json();
+
+    if (resp.ok) {
+      // Store JWT token and user profile
+      sessionStorage.setItem('transitops_token', data.token);
+      sessionStorage.setItem('transitops_user', JSON.stringify(data.user));
+
+      document.getElementById('login-email').value = '';
+      document.getElementById('login-password').value = '';
+
+      showToast(`Logged in as ${data.user.full_name}`, 'success');
+      await checkAuth();
+    } else {
+      showToast(data.error || 'Invalid email or password', 'error');
+    }
+  } catch (err) {
+    console.error('Login error:', err);
+    showToast('Server unreachable. Please check if backend is running.', 'error');
+  } finally {
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Sign In';
   }
 });
 
 // Logout Button
 document.getElementById('logout-btn').addEventListener('click', () => {
-  sessionStorage.removeItem('transitops_user');
+  clearSession();
+  state.user = null;
   showToast('Logged out successfully.', 'info');
   checkAuth();
 });
 
-// ==========================================
+
 // 3. UI VIEW CONTROLLER & ROUTING
-// ==========================================
+
 
 function setupEventListeners() {
   // Navigation tabs
@@ -371,9 +426,9 @@ function showToast(message, type = 'info') {
   }, 4000);
 }
 
-// ==========================================
+
 // 4. RENDERING & OPERATIONS
-// ==========================================
+
 
 // --- DASHBOARD ---
 function renderDashboard() {
@@ -1516,7 +1571,8 @@ let mapMarkers = [];
 // Fetch vehicle locations from the backend database
 async function updateFleetTelemetryMap() {
     try {
-        const response = await fetch('http://localhost:3000/api/vehicles');
+        const response = await authFetch('http://localhost:3000/api/vehicles');
+        if (!response.ok) return; // Skip if not authenticated
         const vehicles = await response.json();
 
         mapMarkers.forEach(marker => map.removeLayer(marker));
