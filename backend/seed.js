@@ -1,5 +1,5 @@
 const { Pool } = require('pg');
-const bcrypt = require('bcrypt');
+const bcrypt = require('bcryptjs');
 
 // PostgreSQL Connection 
 const pool = new Pool({
