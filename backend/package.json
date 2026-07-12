@@ -1,23 +1,25 @@
 {
-  "name": "tranisit-ops",
+  "name": "transit-ops",
   "version": "1.0.0",
   "description": "Smart Transport Operations Platform created for Odoo Hackathon",
   "main": "index.js",
   "scripts": {
+    "start": "node server.js",
+    "seed": "node seed.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Emerald952/Tranisit-Ops.git"
+    "url": "git+https://github.com/Emerald952/Transit-Ops.git"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "bugs": {
-    "url": "https://github.com/Emerald952/Tranisit-Ops/issues"
+    "url": "https://github.com/Emerald952/Transit-Ops/issues"
   },
-  "homepage": "https://github.com/Emerald952/Tranisit-Ops#readme",
+  "homepage": "https://github.com/Emerald952/Transit-Ops#readme",
   "dependencies": {
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.6",
